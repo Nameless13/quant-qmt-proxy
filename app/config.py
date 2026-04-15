@@ -49,6 +49,8 @@ class XTQuantDataConfig(BaseModel):
     max_subscriptions: int = 100  # 单实例最大订阅数
     heartbeat_timeout: int = 60  # WebSocket心跳超时（秒）
     whole_quote_enabled: bool = False  # 是否允许全推订阅
+    history_request_timeout: int = 30  # 历史查询接口超时（秒）
+    history_download_timeout: int = 180  # 历史下载接口超时（秒）
 
 
 class XTQuantTradingConfig(BaseModel):
@@ -173,7 +175,9 @@ def load_config(config_file: Optional[str] = None) -> Settings:
                     "path": config_data.get("xtquant", {}).get("data", {}).get("path", "./data"),
                     "config_path": config_data.get("xtquant", {}).get("data", {}).get("config_path", "./xtquant/config"),
                     "qmt_userdata_path": config_data.get("xtquant", {}).get("qmt_userdata_path"),
-                    "whole_quote_enabled": config_data.get("xtquant", {}).get("data", {}).get("whole_quote_enabled", False)
+                    "whole_quote_enabled": config_data.get("xtquant", {}).get("data", {}).get("whole_quote_enabled", False),
+                    "history_request_timeout": config_data.get("xtquant", {}).get("data", {}).get("history_request_timeout", 30),
+                    "history_download_timeout": config_data.get("xtquant", {}).get("data", {}).get("history_download_timeout", 180)
                 },
                 "trading": {
                     "allow_real_trading": mode_config.get("allow_real_trading", False),

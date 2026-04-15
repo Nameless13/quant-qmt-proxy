@@ -71,6 +71,7 @@ htmlcov/
 *.temp
 temp/
 tmp/
+*.dmp
 
 # OS
 Thumbs.db

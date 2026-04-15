@@ -29,7 +29,7 @@ grpc:
 # xtquant配置
 xtquant:
   # QMT安装路径
-  qmt_userdata_path: "D:\\国金QMT交易端模拟\\userdata_mini"
+  qmt_userdata_path: "C:\\ProgramData\\国金QMT交易端模拟\\userdata_mini"
   
   # 数据路径配置
   data:
@@ -64,9 +64,9 @@ modes:
   
   # dev模式: 连接xtquant，获取真实数据，不允许交易
   dev:
-    debug: true
+    debug: false
     host: "0.0.0.0"
-    port: 8000
+    port: 18000
     log_level: "DEBUG"
     xtquant_mode: "dev"
     allow_real_trading: false

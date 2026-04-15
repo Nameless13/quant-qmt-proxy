@@ -2,7 +2,10 @@
 数据服务层
 """
 import os
+import subprocess
 import sys
+import threading
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from app.utils.logger import logger
@@ -103,7 +106,27 @@ class DataService:
             
             def try_connect():
                 try:
-                    connect_result['client'] = xtdata.connect()
+                    if hasattr(xtdata, 'connect'):
+                        connect_result['client'] = xtdata.connect()
+                        return
+
+                    if not hasattr(xtdata, 'get_client'):
+                        raise AttributeError("xtdata does not expose connect or get_client")
+
+                    client = xtdata.get_client()
+                    if client is None:
+                        raise RuntimeError("xtdata.get_client() returned None")
+
+                    if hasattr(client, 'is_connected') and client.is_connected():
+                        connect_result['client'] = client
+                        return
+
+                    if hasattr(client, 'connect'):
+                        client.connect()
+                        connect_result['client'] = client
+                        return
+
+                    raise AttributeError("xtdata client does not expose connect")
                 except Exception as e:
                     connect_result['error'] = e
             
@@ -139,6 +162,72 @@ class DataService:
         return (            
             self.settings.xtquant.mode in [XTQuantMode.DEV, XTQuantMode.PROD]
         )
+
+    def _call_with_timeout(self, func, timeout: int, action: str):
+        """在后台线程中执行阻塞 xtdata 调用，避免卡死整个服务线程。"""
+        result: Dict[str, Any] = {"value": None, "error": None}
+
+        def runner() -> None:
+            try:
+                result["value"] = func()
+            except Exception as exc:
+                result["error"] = exc
+
+        worker = threading.Thread(target=runner, daemon=True, name=f"xtdata-{action}")
+        worker.start()
+        worker.join(timeout=float(timeout))
+
+        if worker.is_alive():
+            raise TimeoutError(f"{action} 超时，超过 {timeout} 秒仍未返回")
+
+        if result["error"] is not None:
+            raise result["error"]
+
+        return result["value"]
+
+    def _call_history_worker(self, action: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+        """通过独立子进程执行可能卡死的 xtdata 历史数据调用。"""
+        worker_path = os.path.join(os.path.dirname(__file__), "xtdata_history_worker.py")
+        worker_payload = {
+            **payload,
+            "action": action,
+            "qmt_userdata_path": self.settings.xtquant.data.qmt_userdata_path,
+        }
+
+        try:
+            completed = subprocess.run(
+                [sys.executable, worker_path],
+                input=json.dumps(worker_payload, ensure_ascii=False),
+                capture_output=True,
+                text=True,
+                timeout=float(timeout),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"{action} 超时，超过 {timeout} 秒仍未返回") from exc
+
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+
+        parsed: Optional[Dict[str, Any]] = None
+        for line in reversed(stdout.splitlines() if stdout else []):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                parsed = json.loads(text)
+                break
+            except json.JSONDecodeError:
+                continue
+
+        if parsed is None:
+            detail = stderr or stdout or f"worker exit code={completed.returncode}"
+            raise RuntimeError(f"{action} worker returned invalid output: {detail}")
+
+        if not parsed.get("ok", False):
+            raise RuntimeError(parsed.get("error") or f"{action} failed")
+
+        return parsed.get("result") or {}
     
     def get_market_data(self, request: MarketDataRequest) -> List[MarketDataResponse]:
         """获取市场数据"""
@@ -183,7 +272,8 @@ class DataService:
                             for k, v in data.items():
                                 logger.debug(f"[{k}] 类型: {type(v)}, 形状: {v.shape if hasattr(v, 'shape') else 'N/A'}")
                                 if hasattr(v, "dtypes"):                                                                        
-                                    logger.debug(f"[{k}] dtypes: {str(v.dtypes).split('\n')[0]}")                                    
+                                    dtype_line = str(v.dtypes).splitlines()[0]
+                                    logger.debug(f"[{k}] dtypes: {dtype_line}")
                                 if hasattr(v, 'head'):
                                     logger.debug(f"前几行:\n{v.head()}")
                         
@@ -944,17 +1034,20 @@ class DataService:
                 
                 if self._should_use_real_data():
                     try:
-                        data = xtdata.get_local_data(
-                            field_list=request.fields or [],
-                            stock_list=[stock_code],
-                            period=request.period,
-                            start_time=request.start_time,
-                            end_time=request.end_time,
-                            count=-1,
-                            dividend_type=request.adjust_type or "none"
+                        result = self._call_history_worker(
+                            action="get_local_data",
+                            payload={
+                                "stock_code": stock_code,
+                                "fields": request.fields or [],
+                                "period": request.period,
+                                "start_time": request.start_time,
+                                "end_time": request.end_time,
+                                "adjust_type": request.adjust_type or "none",
+                            },
+                            timeout=self.settings.xtquant.data.history_request_timeout,
                         )
-                        
-                        formatted_data = self._format_market_data(data, request.fields)
+
+                        formatted_data = result.get("data") or []
                     except Exception as e:
                         logger.error(f"获取真实本地数据失败: {e}")
                         raise DataServiceException(f"获取本地数据失败 [{stock_code}]: {str(e)}")
@@ -1082,17 +1175,20 @@ class DataService:
             for stock_code in request.stock_codes:
                 if self._should_use_real_data():
                     try:
-                        data = xtdata.get_full_kline(
-                            field_list=request.fields or [],
-                            stock_list=[stock_code],
-                            period=request.period,
-                            start_time=request.start_time,
-                            end_time=request.end_time,
-                            count=1,  # 仅最新一天
-                            dividend_type=request.adjust_type or "none"
+                        result = self._call_history_worker(
+                            action="get_full_kline",
+                            payload={
+                                "stock_code": stock_code,
+                                "fields": request.fields or [],
+                                "period": request.period,
+                                "start_time": request.start_time,
+                                "end_time": request.end_time,
+                                "adjust_type": request.adjust_type or "none",
+                            },
+                            timeout=self.settings.xtquant.data.history_request_timeout,
                         )
-                        
-                        formatted_data = self._format_market_data(data, request.fields)
+
+                        formatted_data = result.get("data") or []
                     except Exception as e:
                         logger.error(f"获取真实全推K线失败: {e}")
                         raise DataServiceException(f"获取全推K线失败 [{stock_code}]: {str(e)}")
@@ -1130,13 +1226,16 @@ class DataService:
             if self._should_use_real_data():
                 try:
                     logger.info(f"下载历史数据开始，stock: {stock_code} period: {period}")
-                    # xtdata下载接口是同步的，会阻塞直到完成
-                    xtdata.download_history_data(
-                        stock_code=stock_code,
-                        period=period,
-                        start_time=start_time,
-                        end_time=end_time,
-                        incrementally=incrementally
+                    self._call_history_worker(
+                        action="download_history_data",
+                        payload={
+                            "stock_code": stock_code,
+                            "period": period,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "incrementally": incrementally,
+                        },
+                        timeout=self.settings.xtquant.data.history_download_timeout,
                     )
                     
                     return DownloadResponse(
