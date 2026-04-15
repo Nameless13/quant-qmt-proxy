@@ -69,9 +69,10 @@ htmlcov/
 # Temporary files
 *.tmp
 *.temp
+*.dmp
+*.mdmp
 temp/
 tmp/
-*.dmp
 
 # OS
 Thumbs.db
