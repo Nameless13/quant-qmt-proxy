@@ -1110,6 +1110,10 @@ class DataService:
                     
                     return results
                 except Exception as e:
+                    error_message = str(e)
+                    if "无法连接行情服务" in error_message:
+                        logger.warning(f"行情服务当前不可用，full_tick 返回空结果: {error_message}")
+                        return {}
                     logger.error(f"获取真实全推数据失败: {e}")
                     raise DataServiceException(f"获取全推数据失败: {str(e)}")
             
